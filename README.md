@@ -51,6 +51,7 @@ commit-gate message .git/COMMIT_EDITMSG
 commit-gate message HEAD              # the commit you just made
 commit-gate pr --body pr.md
 commit-gate baseline                  # accept today's findings; block new ones
+commit-gate rules                     # every rule, its severity, and why
 commit-gate install                   # hooks + agent instructions
 ```
 
@@ -79,7 +80,6 @@ Exit codes: `0` clean · `1` blocked · `2` usage · `3` not a git repository.
 | `any` — in TypeScript | error |
 | `one-line-if` — control statement without braces | error |
 | `console` — logging in application code (test, script and CLI paths exempt) | warn |
-| `nesting` — deeper than 3 levels | warn |
 | `file-length` — over 200 lines | warn |
 
 ### Comments
@@ -132,7 +132,7 @@ Optional `commit-gate.json` at the repository root. Every threshold and rule can
 
 ```json
 {
-  "code": { "maxFunctionLines": 40, "forbidConsole": false },
+  "code": { "maxFileLines": 300, "forbidConsole": false },
   "comments": { "restatementOverlap": 0.7 },
   "message": { "requireConventional": true, "maxSubjectLength": 50 },
   "pr": { "requiredSections": ["Summary", "Testing"] },
@@ -148,25 +148,35 @@ Any rule can be wrong. Silence one, with a reason:
 const client: any = sdk(); // gate-ignore: any the SDK ships no types
 ```
 
-A suppression names one rule and takes a reason, so the next reader knows why.
+Or on the line above, where a formatter would re-break a trailing comment:
+
+```ts
+// gate-ignore-next-line: any the SDK ships no types
+const client: any = sdk();
+```
+
+A suppression names **one** rule and takes a reason, so it silences that rule only and the next reader knows why. A next-line directive reaches the line directly below it, nothing further.
 
 ## Baselines
 
-`commit-gate baseline` records today's findings by rule and path in `commit-gate-baseline.json`. Those stop blocking; anything new blocks. Shrink the file as you clean up, and delete it when it's empty. A baseline is for code that predates the gate, not for code you just wrote.
+`commit-gate baseline` scans the tracked tree and records today's findings by rule and path in `commit-gate-baseline.json`. Those stop blocking; anything new blocks.
+
+**It refuses to record findings in any file your current change touches**, and exits 1 listing them. There is no `--force`: a baseline is for code that predates the gate, not for code you just wrote. The escape is a suppression, which lands in the diff and gets reviewed.
+
+Entries nothing violates any more are dropped when you re-run it, so the file shrinks as you clean up. Delete it when it's empty.
 
 ## Tests
 
 ```bash
 npm test            # unit tests, then end to end
-npm run test:unit   # 26 tests on the rules, no git
-npm run test:cli    # 44 tests: real repositories, real staged changes, real hooks
+npm run test:unit   # 33 tests on the rules, no git
+npm run test:cli    # 52 tests: real repositories, real staged changes, real hooks
 ```
 
 ## Limitations
 
 - **Line-based, not a parser.** A comment split across lines, or code in an unusual layout, can slip past. It is a gate, not a type checker; keep your linter too.
 - **The restatement check is a heuristic**, which is why it's a warning rather than an error, and why `restatementOverlap` is configurable.
-- **Function length is not yet measured** (file length and nesting are); it needs a parser to do honestly, so it's deliberately absent rather than half-right.
 - **Secrets detection catches shapes it knows.** Use a dedicated scanner if that's your main concern.
 
 ## License

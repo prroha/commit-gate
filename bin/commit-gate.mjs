@@ -7,12 +7,23 @@
 import { readFileSync } from "node:fs";
 import { loadConfig } from "../lib/config.mjs";
 import { HELP } from "../lib/help.mjs";
-import { addedLines, commitMessageFrom, diffFor, fileLineCount, GitError, repositoryRoot } from "../lib/git.mjs";
+import { renderRules } from "../lib/catalogue.mjs";
+import {
+  addedLines,
+  allLinesOf,
+  changedPaths,
+  commitMessageFrom,
+  diffFor,
+  fileLineCount,
+  GitError,
+  repositoryRoot,
+  trackedFiles,
+} from "../lib/git.mjs";
 import { checkFiles, SEVERITY } from "../lib/rules.mjs";
 import { checkMessage } from "../lib/message.mjs";
 import { checkPullRequest } from "../lib/pr.mjs";
-import { countBySeverity, renderForAgent, renderJson, renderText } from "../lib/report.mjs";
-import { applyBaseline, loadBaseline, writeBaseline } from "../lib/baseline.mjs";
+import { reportFindings } from "../lib/report.mjs";
+import { applyBaseline, loadBaseline, refusedRecordings, staleEntries, writeBaseline } from "../lib/baseline.mjs";
 import { install } from "../lib/install.mjs";
 
 const EXIT = { ok: 0, blocked: 1, usage: 2, noRepository: 3 };
@@ -79,23 +90,6 @@ function readVersion() {
   return JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 }
 
-function report(findings, options, baselineSkipped = 0) {
-  if (options.json) {
-    console.log(renderJson(findings, { strict: options.strict, baselineSkipped }));
-  } else if (options.agent) {
-    console.log(renderForAgent(findings));
-  } else {
-    console.log(renderText(findings, { strict: options.strict }));
-    if (baselineSkipped > 0) {
-      console.log(`(${baselineSkipped} pre-existing finding${baselineSkipped === 1 ? "" : "s"} accepted by the baseline)`);
-    }
-  }
-  const { errors, warnings } = countBySeverity(findings);
-  if (errors > 0 || (options.strict && warnings > 0)) {
-    process.exit(EXIT.blocked);
-  }
-}
-
 function changeFindings(root, config, options) {
   const diff = diffFor({ root, range: options.range, staged: options.staged });
   const files = addedLines(diff);
@@ -108,20 +102,26 @@ function changeFindings(root, config, options) {
   return checkFiles(files, config, fileLineCounts);
 }
 
+function reportAndExit(findings, options, baselineSkipped = 0) {
+  if (reportFindings(findings, options, baselineSkipped)) {
+    process.exit(EXIT.blocked);
+  }
+}
+
 function runCheck(root, config, options) {
   const findings = changeFindings(root, config, options);
   if (!options.baseline) {
-    report(findings, options);
+    reportAndExit(findings, options);
     return;
   }
   const { kept, skipped } = applyBaseline(findings, loadBaseline(root));
-  report(kept, options, skipped);
+  reportAndExit(kept, options, skipped);
 }
 
 function runMessage(root, config, options) {
   const source = options.target ?? ".git/COMMIT_EDITMSG";
   const text = source === "HEAD" ? commitMessageFrom("HEAD", root) : readFileSync(source, "utf8");
-  report(checkMessage(text, config.message), options);
+  reportAndExit(checkMessage(text, config.message), options);
 }
 
 function runPullRequest(root, config, options) {
@@ -130,14 +130,48 @@ function runPullRequest(root, config, options) {
   }
   const body = readFileSync(options.body, "utf8");
   const commitBody = commitMessageFrom("HEAD", root) ?? "";
-  report(checkPullRequest(body, config.pr, commitBody), options);
+  reportAndExit(checkPullRequest(body, config.pr, commitBody), options);
+}
+
+const BINARY_EXTENSIONS =
+  /\.(png|jpe?g|gif|webp|ico|svgz?|pdf|zip|gz|tgz|bz2|xz|woff2?|ttf|otf|eot|mp[34]|mov|wav|so|dylib|dll|exe|wasm|jar|class|bin|lock)$/i;
+
+function wholeTreeFindings(root, config) {
+  const files = new Map();
+  const fileLineCounts = {};
+  for (const path of trackedFiles(root)) {
+    if (BINARY_EXTENSIONS.test(path)) {
+      continue;
+    }
+    const lines = allLinesOf(path, root);
+    files.set(path, lines);
+    fileLineCounts[path] = lines.length;
+  }
+  return checkFiles(files, config, fileLineCounts);
 }
 
 function runBaseline(root, config, options) {
-  const findings = changeFindings(root, config, { ...options, range: options.range ?? "HEAD" });
-  const accepted = writeBaseline(root, findings);
+  if (options.range) {
+    fail("baseline scans the whole tree, so --range does not apply.");
+  }
+  const wholeTree = wholeTreeFindings(root, config);
+  const touched = changedPaths(diffFor({ root, staged: true }));
+  const refused = refusedRecordings(wholeTree, touched);
+  if (refused.length > 0) {
+    console.error("commit-gate: refusing to record findings in files this change touches:");
+    for (const key of refused) {
+      console.error(`  ${key.replace("::", "  ")}`);
+    }
+    console.error("\nFix them, or suppress one with a reason so the exception is reviewed.");
+    process.exit(EXIT.blocked);
+  }
+  const stale = staleEntries(loadBaseline(root), wholeTree);
+  const accepted = writeBaseline(root, wholeTree);
   console.log(`commit-gate: recorded ${accepted} accepted finding${accepted === 1 ? "" : "s"}.`);
-  console.log("New findings will block from now on. Shrink this file as you clean up.");
+  if (stale.length > 0) {
+    console.log(`Dropped ${stale.length} entr${stale.length === 1 ? "y" : "ies"} nothing violates any more.`);
+  }
+  console.log("New findings block from now on. Shrink this file as you clean up.");
 }
 
 function runInstall(root, options) {
@@ -163,6 +197,10 @@ function main() {
     console.log(HELP);
     return;
   }
+  if (options.command === "rules") {
+    console.log(renderRules());
+    return;
+  }
 
   let root;
   try {
@@ -186,7 +224,10 @@ function main() {
   try {
     command();
   } catch (error) {
-    fail(error instanceof GitError ? error.message : error.message);
+    if (error instanceof GitError && /unknown revision|bad revision/i.test(error.message)) {
+      fail(`${options.range} does not resolve to a commit range in this repository.`);
+    }
+    fail(error.message);
   }
 }
 

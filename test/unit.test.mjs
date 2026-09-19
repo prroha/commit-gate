@@ -7,7 +7,8 @@ import { addedLines } from "../lib/git.mjs";
 import { checkCode, checkComments, checkFiles, checkSecrets, globToRegExp, restatementRatio } from "../lib/rules.mjs";
 import { checkMessage, looksImperative, splitMessage } from "../lib/message.mjs";
 import { checkPullRequest, sectionsOf } from "../lib/pr.mjs";
-import { applyBaseline, keyFor } from "../lib/baseline.mjs";
+import { applyBaseline, keyFor, refusedRecordings, staleEntries } from "../lib/baseline.mjs";
+import { RULES, renderRules } from "../lib/catalogue.mjs";
 import { countBySeverity, renderForAgent } from "../lib/report.mjs";
 
 const lines = (...texts) => texts.map((text, index) => ({ line: index + 1, text }));
@@ -251,4 +252,56 @@ test("counts severities and writes an agent block that says what to judge", () =
   assert.match(block, /1 error\(s\) and 1 warning\(s\)/);
   assert.match(block, /judge these yourself/);
   assert.match(block, /names say what things are/);
+});
+
+test("a next-line suppression only reaches the line directly below", () => {
+  const adjacent = [
+    { line: 11, text: "// gate-ignore-next-line: any the SDK ships no types" },
+    { line: 12, text: "const client: any = sdk();" },
+  ];
+  assert.deepEqual(rulesOf(checkCode("a.ts", adjacent, DEFAULTS.code, null)), []);
+
+  const distant = [
+    { line: 11, text: "// gate-ignore-next-line: any the SDK ships no types" },
+    { line: 900, text: "const unrelated: any = other();" },
+  ];
+  assert.deepEqual(rulesOf(checkCode("a.ts", distant, DEFAULTS.code, null)), ["any"]);
+});
+
+test("a suppression silences the rule it names, not every comment rule", () => {
+  const lines = [
+    { line: 1, text: "// gate-ignore-next-line: console we print on purpose" },
+    { line: 2, text: "// Updated the retry count to three" },
+  ];
+  assert.deepEqual(rulesOf(checkComments("a.ts", lines, DEFAULTS.comments)), ["changelog-comment"]);
+});
+
+test("code rules ignore comment-only lines, so prose about code is safe", () => {
+  const lines = [
+    { line: 1, text: "// we call console.log in the CLI, and pass any value through" },
+    { line: 2, text: "const total = 1;" },
+  ];
+  assert.deepEqual(rulesOf(checkCode("a.ts", lines, DEFAULTS.code, null)), []);
+});
+
+test("refuses to record a finding in a file the change touches, finding or not", () => {
+  const findings = [
+    { rule: "any", path: "src/touched.ts", line: 3 },
+    { rule: "any", path: "src/untouched.ts", line: 9 },
+  ];
+  assert.deepEqual(refusedRecordings(findings, ["src/touched.ts"]), ["any::src/touched.ts"]);
+  assert.deepEqual(refusedRecordings(findings, ["src/elsewhere.ts"]), []);
+});
+
+test("reports a recorded finding that nothing violates any more", () => {
+  const baseline = new Set(["any::src/fixed.ts", "any::src/still.ts"]);
+  assert.deepEqual(staleEntries(baseline, [{ rule: "any", path: "src/still.ts" }]), ["any::src/fixed.ts"]);
+});
+
+test("the catalogue covers every rule the checks can report", () => {
+  const catalogued = new Set(RULES.map((entry) => entry.rule));
+  for (const rule of ["secret", "empty-pr", "missing-section", "restated-comment", "file-length"]) {
+    assert.ok(catalogued.has(rule), `${rule} is missing from the catalogue`);
+  }
+  assert.match(renderRules(), /advisory: /);
 });

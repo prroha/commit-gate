@@ -39,6 +39,14 @@ check_code() {
   fi
 }
 
+commit_at() {
+  local repo="$1" days_ago="$2" message="$3"
+  local stamp
+  stamp="$(date -u -v-"${days_ago}"d +"%Y-%m-%dT%H:%M:%S" 2>/dev/null \
+    || date -u -d "${days_ago} days ago" +"%Y-%m-%dT%H:%M:%S")"
+  GIT_AUTHOR_DATE="$stamp" GIT_COMMITTER_DATE="$stamp" git -C "$repo" commit -q -m "$message"
+}
+
 REPO="$WORK/repo"
 mkdir -p "$REPO/src"
 git -C "$REPO" init -q -b main
@@ -114,14 +122,63 @@ check_missing "a suppression silences its own rule" "[any]" "$("$GATE" check --s
 check "and leaves the others" "debugger" "$("$GATE" check --staged --dir "$REPO" 2>&1)"
 
 echo "baseline"
-git -C "$REPO" stash -q
+check "refuses to record findings in a file this change touches" "refusing to record" \
+  "$("$GATE" baseline --dir "$REPO" 2>&1)"
 "$GATE" baseline --dir "$REPO" >/dev/null 2>&1
-git -C "$REPO" stash pop -q
-git -C "$REPO" add -A
-check "records what already existed" "accepted" "$("$GATE" baseline --dir "$REPO" 2>&1)"
-check "a baselined finding stops blocking" "clean" "$("$GATE" check --staged --dir "$REPO" 2>&1)"
-check "--no-baseline sees it again" "blocked" "$("$GATE" check --staged --dir "$REPO" --no-baseline 2>&1)"
-rm -f "$REPO/commit-gate-baseline.json"
+check_code "and exits 1 rather than burying them" 1 "$?"
+
+LEGACY="$WORK/legacy"
+mkdir -p "$LEGACY/src"
+git -C "$LEGACY" init -q -b main
+git -C "$LEGACY" config user.email test@example.com
+git -C "$LEGACY" config user.name "Test"
+printf '# legacy\n' > "$LEGACY/README.md"
+git -C "$LEGACY" add README.md
+commit_at "$LEGACY" 200 "add a readme"
+cat > "$LEGACY/src/legacy.ts" <<'CODE'
+export function old(value: any) {
+  if (!value) return null;
+  return value;
+}
+CODE
+git -C "$LEGACY" add -A
+commit_at "$LEGACY" 100 "add code that predates the gate"
+printf 'export const version = 1;
+' > "$LEGACY/src/version.ts"
+git -C "$LEGACY" add -A
+commit_at "$LEGACY" 1 "add a version constant"
+check "records what already existed" "recorded 2 accepted" "$("$GATE" baseline --dir "$LEGACY" 2>&1)"
+# The middle commit carries the legacy violations.
+check "a baselined finding stops blocking" "accepted by the baseline" \
+  "$("$GATE" check --range HEAD~2...HEAD~1 --dir "$LEGACY" 2>&1)"
+git -C "$LEGACY" stash -q --include-untracked 2>/dev/null
+check "an unresolvable range is reported plainly" "does not resolve" \
+  "$("$GATE" check --range nope...HEAD --dir "$LEGACY" 2>&1)"
+
+check "--no-baseline sees a baselined finding again" "blocked" \
+  "$("$GATE" check --range HEAD~2...HEAD~1 --dir "$LEGACY" --no-baseline 2>&1)"
+check "--range is refused for baseline" "does not apply" \
+  "$("$GATE" baseline --range main...HEAD --dir "$LEGACY" 2>&1)"
+
+echo "rules"
+rules="$("$GATE" rules)"
+check "lists a rule with its severity" "secret" "$rules"
+check "says why an advisory rule never blocks" "advisory:" "$rules"
+"$GATE" rules --dir "$WORK" >/dev/null 2>&1
+check_code "works outside a repository" 0 "$?"
+
+echo "next-line suppression"
+NEXT="$WORK/next"
+mkdir -p "$NEXT/src"
+git -C "$NEXT" init -q -b main
+git -C "$NEXT" config user.email test@example.com
+git -C "$NEXT" config user.name "Test"
+cat > "$NEXT/src/sdk.ts" <<'CODE'
+// gate-ignore-next-line: any the SDK ships no types
+export const client: any = sdk();
+CODE
+git -C "$NEXT" add -A
+check "a directive above the line silences it" "clean" "$("$GATE" check --staged --dir "$NEXT" 2>&1)"
 
 echo "strict"
 WARN_REPO="$WORK/warn-repo"
