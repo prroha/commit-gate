@@ -9,7 +9,8 @@ import { checkMessage, looksImperative, splitMessage } from "../lib/message.mjs"
 import { checkPullRequest, sectionsOf } from "../lib/pr.mjs";
 import { applyBaseline, keyFor, refusedRecordings, staleEntries } from "../lib/baseline.mjs";
 import { RULES, renderRules } from "../lib/catalogue.mjs";
-import { countBySeverity, renderForAgent } from "../lib/report.mjs";
+import { countBySeverity, renderForAgent, renderReport } from "../lib/report.mjs";
+import { runRules } from "../lib/commands.mjs";
 
 const lines = (...texts) => texts.map((text, index) => ({ line: index + 1, text }));
 const rulesOf = (findings) => findings.map((finding) => finding.rule);
@@ -304,4 +305,24 @@ test("the catalogue covers every rule the checks can report", () => {
     assert.ok(catalogued.has(rule), `${rule} is missing from the catalogue`);
   }
   assert.match(renderRules(), /advisory: /);
+});
+
+test("a report is text plus whether it blocks, and prints nothing itself", () => {
+  const error = { rule: "any", severity: "error", path: "a.ts", line: 1, message: "m", fix: "f" };
+  const warning = { rule: "console", severity: "warn", path: "a.ts", line: 2, message: "m", fix: "f" };
+
+  assert.deepEqual(renderReport([], { json: false }), { text: "commit-gate: clean", blocked: false });
+  assert.equal(renderReport([error], { json: false }).blocked, true);
+  assert.equal(renderReport([warning], { json: false }).blocked, false);
+  assert.equal(renderReport([warning], { json: false, strict: true }).blocked, true);
+
+  const json = JSON.parse(renderReport([error], { json: true }).text);
+  assert.equal(json.blocked, true);
+  assert.equal(json.errors, 1);
+});
+
+test("the rules command needs no repository and no terminal", () => {
+  const { text, blocked } = runRules();
+  assert.equal(blocked, false);
+  assert.match(text, /secret/);
 });
