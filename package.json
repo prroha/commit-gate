@@ -1,0 +1,20 @@
+{
+  "name": "commit-gate",
+  "version": "1.0.0",
+  "description": "Check a change before it lands: clean code, honest comments, a clear commit message and a filled-in PR body. Deterministic checks plus a checklist for whatever an AI agent must judge itself.",
+  "type": "module",
+  "bin": {
+    "commit-gate": "bin/commit-gate.mjs"
+  },
+  "files": ["bin", "lib", "agents", "README.md", "LICENSE"],
+  "scripts": {
+    "test": "npm run test:unit && npm run test:cli",
+    "test:unit": "node --test test/unit.test.mjs",
+    "test:cli": "bash test/cli.test.sh"
+  },
+  "engines": { "node": ">=22" },
+  "keywords": ["git-hooks", "pre-commit", "code-review", "commit-message", "pull-request", "linter", "ai-agent", "claude-code", "cli"],
+  "license": "MIT",
+  "author": "Prakash Subedi",
+  "repository": { "type": "git", "url": "git+https://github.com/prroha/commit-gate.git" }
+}
