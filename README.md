@@ -177,7 +177,7 @@ npm run test:cli    # 52 tests: real repositories, real staged changes, real hoo
 
 - **Line-based, not a parser.** A comment split across lines, or code in an unusual layout, can slip past. It is a gate, not a type checker; keep your linter too.
 - **The restatement check is a heuristic**, which is why it's a warning rather than an error, and why `restatementOverlap` is configurable.
-- **Secrets detection catches shapes it knows.** Use a dedicated scanner if that's your main concern.
+- **Secrets detection catches shapes it knows.** Use a dedicated scanner if that's your main concern. The value must look like a credential, so a short or hyphenated string is not reported.
 
 ## License
 
