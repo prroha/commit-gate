@@ -160,6 +160,38 @@ check "--no-baseline sees a baselined finding again" "blocked" \
 check "--range is refused for baseline" "does not apply" \
   "$("$GATE" baseline --range main...HEAD --dir "$LEGACY" 2>&1)"
 
+echo "file length on a branch check"
+LONG="$WORK/long"
+mkdir -p "$LONG/src"
+git -C "$LONG" init -q -b main
+git -C "$LONG" config user.email test@example.com
+git -C "$LONG" config user.name "Test"
+printf '# long\n' > "$LONG/README.md"
+git -C "$LONG" add -A
+git -C "$LONG" commit -q -m "add a readme
+
+The repository needs somewhere to say what it is."
+awk 'BEGIN { for (i = 1; i <= 300; i++) printf "export const value%d = %d;\n", i, i }' > "$LONG/src/many.ts"
+git -C "$LONG" add -A
+git -C "$LONG" commit -q -m "add the constants
+
+They come from the upstream table."
+check "a range check measures the file, not only a staged one" "file-length" \
+  "$("$GATE" check --range HEAD~1...HEAD --dir "$LONG" 2>&1)"
+
+echo "commit messages from another directory"
+printf 'Updated the constants.\n' > "$LONG/.git/COMMIT_EDITMSG"
+check "the default message file is read from the repository, not the shell's directory" "subject-period" \
+  "$("$GATE" message --dir "$LONG" 2>&1)"
+
+echo "suppression without a reason"
+cat > "$LONG/src/sdk.ts" <<'CODE'
+export const client: any = sdk(); // gate-ignore: any
+CODE
+git -C "$LONG" add -A
+check "a suppression with no reason is reported" "gives no reason" \
+  "$("$GATE" check --staged --dir "$LONG" 2>&1)"
+
 echo "rules"
 rules="$("$GATE" rules)"
 check "lists a rule with its severity" "secret" "$rules"

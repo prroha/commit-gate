@@ -48,20 +48,20 @@ Everything flows one way. No check knows about rendering; no renderer knows abou
 |---|---|---|---|
 | `lib/finding.mjs` | 6 | The `Finding` shape and the two severities | nothing |
 | `lib/paths.mjs` | 28 | `globToRegExp`, `isIgnored`, `allowsConsole` — which files a rule applies to | nothing |
-| `lib/suppression.mjs` | 27 | `gate-ignore` parsing: `suppressedRule`, `isDirective` | nothing |
+| `lib/suppression.mjs` | 49 | `gate-ignore` parsing: `suppressedRule`, `isDirective`, `missingReason` | `finding` |
 | `lib/secrets.mjs` | 39 | `checkSecrets` — credential shapes | `finding` |
-| `lib/comments.mjs` | 147 | `commentBody`, `restatementRatio`, `checkComments` | `finding`, `suppression` |
-| `lib/rules.mjs` | 131 | `checkCode`, `checkFiles` — code rules, and the one place files are filtered | `finding`, `paths`, `secrets`, `comments`, `suppression` |
+| `lib/comments.mjs` | 153 | `commentBody`, `restatementRatio`, `checkComments` | `finding`, `suppression` |
+| `lib/rules.mjs` | 143 | `checkCode`, `checkFiles` — code rules, and the one place files are filtered | `finding`, `paths`, `secrets`, `comments`, `suppression` |
 | `lib/message.mjs` | 70 | `splitMessage`, `looksImperative`, `checkMessage` | `rules` (for `SEVERITY`) |
 | `lib/pr.mjs` | 78 | `sectionsOf`, `checkPullRequest` | `rules` (for `SEVERITY`) |
-| `lib/catalogue.mjs` | 58 | `RULES` and `renderRules` — the static list behind `commit-gate rules` | `finding` |
+| `lib/catalogue.mjs` | 59 | `RULES` and `renderRules` — the static list behind `commit-gate rules` | `finding` |
 | `lib/baseline.mjs` | 53 | `keyFor`, `loadBaseline`, `writeBaseline`, `applyBaseline`, `refusedRecordings`, `staleEntries` | nothing |
-| `lib/report.mjs` | 89 | `countBySeverity`, `renderText`, `renderJson`, `renderForAgent`, `renderReport`, `JUDGEMENT_CHECKLIST` | `rules` (for `SEVERITY`) |
-| `lib/git.mjs` | 118 | `repositoryRoot`, `diffFor`, `addedLines`, `changedPaths`, `fileLineCount`, `trackedFiles`, `allLinesOf`, `commitMessageFrom` | `node:child_process` |
+| `lib/report.mjs` | 107 | `countBySeverity`, `renderText`, `renderJson`, `renderForAgent`, `renderReport`, `JUDGEMENT_CHECKLIST` | `rules` (for `SEVERITY`) |
+| `lib/git.mjs` | 133 | `repositoryRoot`, `diffFor`, `addedLines`, `changedPaths`, `fileLineCount`, `trackedFiles`, `allLinesOf`, `commitMessageFrom` | `node:child_process`, `node:fs` |
 | `lib/config.mjs` | 83 | `DEFAULTS`, `loadConfig`, `mergeConfig` | `node:fs` |
 | `lib/install.mjs` | 124 | `install` — hooks, `SKILL.md`, the `AGENT_SECTION` appended to `CLAUDE.md`/`AGENTS.md` | `node:fs` |
 | `lib/help.mjs` | 40 | The `HELP` string | nothing |
-| `lib/commands.mjs` | 105 | `runCheck`, `runMessage`, `runPullRequest`, `runBaseline`, `runInstall`, `runRules`, `UsageError` | all of the above |
+| `lib/commands.mjs` | 141 | `runCheck`, `runMessage`, `runPullRequest`, `runBaseline`, `runInstall`, `runRules`, `contentSourceFor`, `UsageError` | all of the above |
 | `bin/commit-gate.mjs` | 142 | Argument parsing, dispatch, printing, exit codes | `config`, `help`, `git`, `commands` |
 
 `lib/rules.mjs` re-exports `SEVERITY`, `globToRegExp`, `checkSecrets`, `checkComments` and
@@ -132,8 +132,10 @@ for (const [path, lines] of files) {
 ```
 
 Two things are deliberate there. Secrets run **before** the `CODE_EXTENSIONS` gate, so a
-key committed into a `.env`, a YAML file or a README is still caught; everything else is
-code-only. And ignore paths and fixture paths are checked together, so a rule never sees a
+key committed into a `.env`, a lock file or a README is still caught; everything else is
+code-only. `CODE_EXTENSIONS` names every extension whose comment style `commentBody` knows,
+`.yml`, `.yaml`, `.tf` and `.pl` included — a language the comment rules can read is a
+language they are given. And ignore paths and fixture paths are checked together, so a rule never sees a
 test's own fixture — a test file's job is to contain the exact strings these rules hunt,
 and a checker that fails its own test suite teaches people to disable it.
 
@@ -141,8 +143,9 @@ and a checker that fails its own test suite teaches people to disable it.
 for advisory rules, the reason it never blocks. It is documentation, not dispatch: nothing
 reads it at check time, and `commit-gate rules` is served from it without opening a
 repository at all (`bin/commit-gate.mjs` short-circuits that command before
-`repositoryRoot`). The unit test asserts a handful of rule names are present, which catches
-the obvious drift but not all of it.
+`repositoryRoot`). Nothing dispatches from it, so a unit test reads the rule ids out of the
+check modules' own source and asserts the two sets are equal in both directions: a new rule
+that never reached the catalogue fails, and so does a catalogue entry no check can emit.
 
 ### 3. Severity is a claim about confidence, not importance
 
@@ -171,7 +174,7 @@ commit-gate check --staged
             ├─ commands.changeFindings
             │    ├─ git.diffFor({ root, staged: true })     git diff --cached --unified=0
             │    ├─ git.addedLines(diff)                    Map<path, {line,text}[]>
-            │    ├─ git.fileLineCount(path, root)           git show :path  (index, not HEAD)
+            │    ├─ git.fileLineCount(path, root, source)   the index, a revision, or disk
             │    └─ rules.checkFiles(files, config, counts)
             │         ├─ paths.isIgnored           generated? fixture? skip the file
             │         ├─ secrets.checkSecrets      every file, code or not
@@ -190,10 +193,12 @@ Two properties fall out of the split:
   `{ text, blocked }`; only `bin/commit-gate.mjs` calls `console.log` or sets an exit code.
   The unit tests call `runRules()` and `renderReport()` directly with no terminal and no
   repository.
-- **`fileLineCount` is only computed under `--staged`**, because it reads `git show :path`
-  — the index. Under `--range` there is no single "current" content to measure, so the
-  `file-length` rule simply does not fire. That is a real gap, not a subtlety: a branch
-  check will not tell you a file grew past the limit.
+- **`fileLineCount` reads whichever revision the check is about.** `commands.contentSourceFor`
+  maps the options to it: `--staged` means the index (`git show :path`), `--range a...b` means
+  `b` (`git show b:path`), and everything else — a bare `git diff`, or a `--range` naming a
+  single revision — means the files on disk, which is what git compared against. A file that
+  cannot be read at that revision counts as nothing to measure, and `file-length` stays quiet
+  rather than failing the run.
 
 ## Finding the false positives before they find you
 
@@ -264,7 +269,10 @@ because the list is not complete and cannot be.
 against `consoleAllowedIn` (`test`, `tests`, `spec`, `scripts`, `bin`, `cli`) and also
 matches `.segment.` inside a filename, so both `scripts/seed.ts` and `src/a.test.ts` are
 exempt. Only `console.log`, `.debug` and `.dir` are matched at all; `console.error` and
-`console.warn` are left alone as legitimate output.
+`console.warn` are left alone as legitimate output. `CONSOLE_LANGUAGES` then limits the rule
+to JavaScript and TypeScript, the way `TYPESCRIPT` limits `any` and `BRACE_LANGUAGES` limits
+`one-line-if`: `console` is a JavaScript object, so a workflow step running
+`node -e "console.log(...)"` is a script doing its job, not application logging.
 
 ## Suppression
 
@@ -289,10 +297,13 @@ Three decisions worth naming:
 - **The next-line form reaches exactly one line**, checked by line number, never by array
   position — see idea 1. A directive at line 11 does not silence line 900 just because
   `--unified=0` put them next to each other in the array.
-- **The reason is captured and then discarded.** `parse` returns it, nothing reads it. It
-  exists so the next human reading the file learns why, and so a suppression is a sentence
-  someone had to write rather than a token they could paste. Enforcing a non-empty reason
-  would be a small change in `suppressedRule`; it is not enforced today.
+- **The reason is required, and `suppression-reason` enforces it.** `missingReason` reports
+  a directive that names a rule and says nothing else, so a suppression stays a sentence
+  someone had to write rather than a token they could paste. The directive still silences
+  its rule: re-reporting the silenced finding on top would bury the one thing this says.
+  Every line reaches exactly one of the two call sites — `checkCode` skips comment-only
+  lines, `checkComments` sees only those — so a directive is reported once, where it is
+  written.
 
 ## The baseline
 
@@ -391,7 +402,8 @@ wrote and does not have to fight the defaults. Absent file means defaults; malfo
 throws a named error rather than silently falling back — a config that is not being read is
 worse than one that refuses to load.
 
-`loadConfig` returns `{ config, source }`; only `config` is consumed today.
+`loadConfig` returns the merged configuration. It used to return `{ config, source }`; the
+source was never read, and a field nothing consumes is a field that drifts.
 
 ## Errors and exit codes
 
@@ -431,8 +443,8 @@ for them to work.
 
 | File | Covers |
 |---|---|
-| `test/unit.test.mjs` | 35 `node:test` cases over the rules, suppression, baselines, config merging, globs and rendering. No git, no filesystem |
-| `test/cli.test.sh` | 52 assertions against real temporary repositories: real staged changes, real hooks, real exit codes |
+| `test/unit.test.mjs` | 45 `node:test` cases over the rules, suppression, baselines, config merging, globs and rendering. No git and no repository; the only files read are this project's own sources, by the two tests that keep the catalogue and the README in step |
+| `test/cli.test.sh` | 55 assertions against real temporary repositories: real staged changes, real hooks, real exit codes |
 
 ```bash
 npm test            # unit, then end to end
@@ -476,16 +488,9 @@ the false-positive defences are verified against the cases someone thought of.
 
 Things the code does not do, which are worth knowing before trusting it:
 
-- **`file-length` needs `--staged`.** `fileLineCount` reads the index, so `--range` never
-  populates the counts and the rule cannot fire on a branch check.
-- **`renderText` sorts by `path + line` as strings**, so line 10 sorts before line 2 within
-  a file. Cosmetic, but it makes long reports harder to read top to bottom.
-- **Comment rules are limited to `CODE_EXTENSIONS`**, which does not include `.yaml`,
-  `.tf` or `.pl` even though `HASH_COMMENT_LANGUAGES` names them. In practice hash-comment
-  rules reach `.py`, `.rb` and `.sh` only.
-- **`runMessage` resolves its file relative to the process's working directory**, not to
-  the repository root, so `--dir` plus a relative message path (including the
-  `.git/COMMIT_EDITMSG` default) reads from the wrong place.
+- **`runPullRequest` resolves `--body` relative to the process's working directory**, not
+  to the repository root, so `--dir` plus a relative body path reads from the wrong place.
+  `runMessage` no longer does this; `pr` still does.
 
 ## Deliberate omissions
 

@@ -23,7 +23,7 @@ Run `commit-gate check --staged --agent` and act on what it says:
 
 ## Suppressing a finding
 
-Only with a reason, and only for one rule:
+Only with a reason, which the gate requires, and only for one rule:
 
 ```ts
 const client: any = sdk(); // gate-ignore: any the SDK ships no types

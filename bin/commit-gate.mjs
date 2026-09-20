@@ -125,7 +125,7 @@ function main() {
   }
 
   try {
-    const { text, blocked } = COMMANDS[options.command](root, loadConfig(root).config, options);
+    const { text, blocked } = COMMANDS[options.command](root, loadConfig(root), options);
     console.log(text);
     process.exitCode = blocked ? EXIT.blocked : EXIT.ok;
   } catch (error) {

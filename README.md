@@ -79,8 +79,9 @@ Exit codes: `0` clean · `1` blocked · `2` usage · `3` not a git repository.
 | `debugger` — left in | error |
 | `any` — in TypeScript | error |
 | `one-line-if` — control statement without braces | error |
-| `console` — logging in application code (test, script and CLI paths exempt) | warn |
+| `console` — logging in JavaScript or TypeScript (test, script and CLI paths exempt) | warn |
 | `file-length` — over 200 lines | warn |
+| `suppression-reason` — a `gate-ignore` that never says why | error |
 
 ### Comments
 | Rule | Severity |
@@ -155,7 +156,7 @@ Or on the line above, where a formatter would re-break a trailing comment:
 const client: any = sdk();
 ```
 
-A suppression names **one** rule and takes a reason, so it silences that rule only and the next reader knows why. A next-line directive reaches the line directly below it, nothing further.
+A suppression names **one** rule and **requires** a reason, so it silences that rule only and the next reader knows why. Leave the reason out and the gate reports `suppression-reason` in its place. A next-line directive reaches the line directly below it, nothing further.
 
 ## Baselines
 
@@ -169,8 +170,8 @@ Entries nothing violates any more are dropped when you re-run it, so the file sh
 
 ```bash
 npm test            # unit tests, then end to end
-npm run test:unit   # 33 tests on the rules, no git
-npm run test:cli    # 52 tests: real repositories, real staged changes, real hooks
+npm run test:unit   # 45 tests on the rules, no git
+npm run test:cli    # 55 tests: real repositories, real staged changes, real hooks
 ```
 
 ## Limitations

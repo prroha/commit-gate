@@ -1,19 +1,25 @@
-// Unit tests for the deterministic rules. No git, no filesystem.
+// Unit tests for the deterministic rules. No git, and no repository: the only
+// files read are this project's own sources, by the tests that keep the
+// catalogue and the README in step with the code.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { DEFAULTS, mergeConfig } from "../lib/config.mjs";
-import { addedLines } from "../lib/git.mjs";
+import { DEFAULTS, loadConfig, mergeConfig } from "../lib/config.mjs";
+import { addedLines, INDEX, WORKING_TREE } from "../lib/git.mjs";
 import { checkCode, checkComments, checkFiles, checkSecrets, globToRegExp, restatementRatio } from "../lib/rules.mjs";
 import { checkMessage, looksImperative, splitMessage } from "../lib/message.mjs";
 import { checkPullRequest, sectionsOf } from "../lib/pr.mjs";
 import { applyBaseline, keyFor, refusedRecordings, staleEntries } from "../lib/baseline.mjs";
 import { RULES, renderRules } from "../lib/catalogue.mjs";
-import { countBySeverity, renderForAgent, renderReport } from "../lib/report.mjs";
-import { runRules } from "../lib/commands.mjs";
+import { countBySeverity, renderForAgent, renderReport, renderText } from "../lib/report.mjs";
+import { contentSourceFor, runMessage, runRules } from "../lib/commands.mjs";
 
 const lines = (...texts) => texts.map((text, index) => ({ line: index + 1, text }));
 const rulesOf = (findings) => findings.map((finding) => finding.rule);
+const sourceOf = (name) => readFileSync(new URL(name, import.meta.url), "utf8");
 
 test("reads only the lines a diff adds, with their real line numbers", () => {
   const diff = [
@@ -102,7 +108,7 @@ test("a suppression with a reason silences one rule only", () => {
     [],
   );
   assert.deepEqual(
-    rulesOf(checkCode("src/a.ts", lines("debugger; // gate-ignore: any"), DEFAULTS.code, null)),
+    rulesOf(checkCode("src/a.ts", lines("debugger; // gate-ignore: any the SDK ships no types"), DEFAULTS.code, null)),
     ["debugger"],
   );
 });
@@ -325,4 +331,104 @@ test("the rules command needs no repository and no terminal", () => {
   const { text, blocked } = runRules();
   assert.equal(blocked, false);
   assert.match(text, /secret/);
+});
+
+test("a report reads top to bottom: by path, then by line as a number", () => {
+  const at = (path, line) => ({ rule: "any", severity: "error", path, line, message: "m", fix: "f" });
+  const text = renderText([at("src/b.ts", 2), at("src/a.ts", 10), at("src/a.ts", 2), at("src/a.ts", 100)], {});
+  assert.deepEqual(
+    [...text.matchAll(/src\/[ab]\.ts:\d+/g)].map((match) => match[0]),
+    ["src/a.ts:2", "src/a.ts:10", "src/a.ts:100", "src/b.ts:2"],
+  );
+});
+
+test("a finding with no line number sorts last instead of crashing the report", () => {
+  const findings = [
+    { rule: "no-body", severity: "warn", path: "commit message", message: "m", fix: "f" },
+    { rule: "subject-period", severity: "error", path: "commit message", line: 1, message: "m", fix: "f" },
+  ];
+  const text = renderText(findings, {});
+  assert.ok(text.indexOf("commit message:1") < text.indexOf("commit message:undefined"));
+});
+
+test("a message path is read from the repository, not from the current directory", () => {
+  const repository = mkdtempSync(join(tmpdir(), "commit-gate-"));
+  writeFileSync(join(repository, "MESSAGE"), "add a retry to the charge path\n\nThe provider drops one in a thousand.\n");
+
+  assert.equal(runMessage(repository, DEFAULTS, { target: "MESSAGE" }).blocked, false);
+  assert.equal(runMessage(repository, DEFAULTS, { target: join(repository, "MESSAGE") }).blocked, false);
+});
+
+test("a range check measures a file at the revision the range ends at", () => {
+  assert.equal(contentSourceFor({ staged: true }), INDEX);
+  assert.equal(contentSourceFor({ range: "main...HEAD" }), "HEAD");
+  assert.equal(contentSourceFor({ range: "HEAD~2..HEAD~1" }), "HEAD~1");
+  // `git diff main` and a bare `git diff` both compare against the files on disk.
+  assert.equal(contentSourceFor({ range: "main" }), WORKING_TREE);
+  assert.equal(contentSourceFor({}), WORKING_TREE);
+});
+
+test("comment rules reach every language whose comments the tool can read", () => {
+  const files = new Map([
+    ["infra/deploy.yml", lines("# Updated to the new image", "image: app:2")],
+    ["infra/main.tf", lines("# Changed the bucket name", 'bucket = "artifacts"')],
+    ["scripts/report.pl", lines("# my $old = legacy($token);", "my $count = 3;")],
+  ]);
+  assert.deepEqual(
+    checkFiles(files, DEFAULTS, {}).map((finding) => `${finding.path} ${finding.rule}`),
+    [
+      "infra/deploy.yml changelog-comment",
+      "infra/main.tf changelog-comment",
+      "scripts/report.pl commented-out-code",
+    ],
+  );
+});
+
+test("a workflow step that prints with node is not console logging in an application", () => {
+  const files = new Map([["ci.yml", lines('      - run: node -e "console.log(process.version)"')]]);
+  assert.deepEqual(rulesOf(checkFiles(files, DEFAULTS, {})), []);
+});
+
+test("a suppression without a reason is a finding of its own", () => {
+  assert.deepEqual(
+    rulesOf(checkCode("src/a.ts", lines("const client: any = sdk(); // gate-ignore: any"), DEFAULTS.code, null)),
+    ["suppression-reason"],
+  );
+  const directive = [
+    { line: 11, text: "// gate-ignore-next-line: changelog-comment" },
+    { line: 12, text: "// Updated the retry count" },
+  ];
+  assert.deepEqual(rulesOf(checkComments("a.ts", directive, DEFAULTS.comments)), ["suppression-reason"]);
+  assert.deepEqual(
+    rulesOf(checkCode("src/a.ts", lines("const client: any = sdk(); // gate-ignore: any the SDK ships no types"), DEFAULTS.code, null)),
+    [],
+  );
+});
+
+// The catalogue is documentation, not dispatch, so nothing at check time keeps
+// it honest. This does.
+test("the catalogue lists every rule the checks can report, and no others", () => {
+  const CHECK_MODULES = ["rules.mjs", "comments.mjs", "secrets.mjs", "suppression.mjs", "message.mjs", "pr.mjs"];
+  const reportable = new Set();
+  for (const name of CHECK_MODULES) {
+    const source = sourceOf(`../lib/${name}`);
+    for (const [, rule] of source.matchAll(/rule: "([a-z-]+)"/g)) {
+      reportable.add(rule);
+    }
+    for (const [, rule] of source.matchAll(/\bat\(\s*(?:[^,"]+,\s*)?"([a-z-]+)"/g)) {
+      reportable.add(rule);
+    }
+  }
+  assert.deepEqual([...reportable].sort(), RULES.map((entry) => entry.rule).sort());
+});
+
+test("the configuration a repository loads is the configuration itself", () => {
+  const config = loadConfig(mkdtempSync(join(tmpdir(), "commit-gate-")));
+  assert.equal(config.code.maxFileLines, DEFAULTS.code.maxFileLines);
+  assert.equal(config.source, undefined);
+});
+
+test("the README counts the tests this file actually has", () => {
+  const declared = /(\d+) tests on the rules/.exec(sourceOf("../README.md"));
+  assert.equal(Number(declared[1]), sourceOf("./unit.test.mjs").match(/^test\(/gm).length);
 });
